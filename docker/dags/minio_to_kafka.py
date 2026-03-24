@@ -100,8 +100,6 @@ def load_raw_to_postgres(**context):
     # Create Schemas
     cur.execute("""
         CREATE SCHEMA IF NOT EXISTS bronze;
-        CREATE SCHEMA IF NOT EXISTS silver;
-        CREATE SCHEMA IF NOT EXISTS gold;
     """)
 
     # Create Bronze Table

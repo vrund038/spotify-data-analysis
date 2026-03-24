@@ -13,31 +13,34 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path="/opt/airflow/dags/.env")
 
 # ------------------------------------------------------
-# CONFIGURATION
+# MINIO CONFIG
 # ------------------------------------------------------
 
-# ----- MinIO -----
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET")
 MINIO_PREFIX = os.getenv("MINIO_PREFIX")
 
-# ----- PostgreSQL -----
-PG_HOST = os.getenv("PG_HOST")          # e.g. host.docker.internal OR localhost
+# ------------------------------------------------------
+# POSTGRES CONFIG
+# ------------------------------------------------------
+
+PG_HOST = os.getenv("PG_HOST")
 PG_DB = os.getenv("PG_DB")
 PG_USER = os.getenv("PG_USER")
 PG_PASSWORD = os.getenv("PG_PASSWORD")
 PG_PORT = os.getenv("PG_PORT", 5432)
-PG_TABLE = os.getenv("PG_TABLE")
 
-# ----- Local Temp -----
 LOCAL_TEMP_PATH = os.getenv("LOCAL_TEMP_PATH", "/tmp/spotify_raw.json")
 
+
 # ------------------------------------------------------
-# TASK 1: EXTRACT
+# EXTRACT
 # ------------------------------------------------------
+
 def extract_from_minio():
+
     s3 = boto3.client(
         "s3",
         endpoint_url=MINIO_ENDPOINT,
@@ -49,8 +52,10 @@ def extract_from_minio():
     contents = response.get("Contents", [])
 
     all_events = []
+
     for obj in contents:
         key = obj["Key"]
+
         if not key.endswith(".json"):
             continue
 
@@ -60,29 +65,27 @@ def extract_from_minio():
         for line in lines:
             try:
                 all_events.append(json.loads(line))
-            except json.JSONDecodeError:
+            except:
                 continue
 
     with open(LOCAL_TEMP_PATH, "w") as f:
         json.dump(all_events, f)
 
-    print(f"✅ Extracted {len(all_events)} events")
+    print(f"Extracted {len(all_events)} events")
+
     return LOCAL_TEMP_PATH
 
 
 # ------------------------------------------------------
-# TASK 2: LOAD TO POSTGRES
+# LOAD TO POSTGRES (BRONZE)
 # ------------------------------------------------------
+
 def load_raw_to_postgres(**context):
 
     file_path = context["ti"].xcom_pull(task_ids="extract_data")
 
     with open(file_path, "r") as f:
         events = json.load(f)
-
-    if not events:
-        print("⚠️ No events found")
-        return
 
     conn = psycopg2.connect(
         host=PG_HOST,
@@ -94,29 +97,41 @@ def load_raw_to_postgres(**context):
 
     cur = conn.cursor()
 
-    # Create table
-    create_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS {PG_TABLE} (
-        event_id TEXT,
-        user_id TEXT,
-        song_id TEXT,
-        artist_name TEXT,
-        song_name TEXT,
-        event_type TEXT,
-        device_type TEXT,
-        country TEXT,
-        timestamp TIMESTAMP
-    );
-    """
-    cur.execute(create_table_sql)
+    # Create Schemas
+    cur.execute("""
+        CREATE SCHEMA IF NOT EXISTS bronze;
+        CREATE SCHEMA IF NOT EXISTS silver;
+        CREATE SCHEMA IF NOT EXISTS gold;
+    """)
 
-    # Insert query
-    insert_sql = f"""
-        INSERT INTO {PG_TABLE} (
-            event_id, user_id, song_id, artist_name, song_name,
-            event_type, device_type, country, timestamp
+    # Create Bronze Table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bronze.spotify_events (
+            event_id TEXT,
+            user_id TEXT,
+            song_id TEXT,
+            artist_name TEXT,
+            song_name TEXT,
+            event_type TEXT,
+            device_type TEXT,
+            country TEXT,
+            timestamp TIMESTAMP
+        );
+    """)
+
+    insert_sql = """
+        INSERT INTO bronze.spotify_events (
+            event_id,
+            user_id,
+            song_id,
+            artist_name,
+            song_name,
+            event_type,
+            device_type,
+            country,
+            timestamp
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
 
     for event in events:
@@ -136,7 +151,7 @@ def load_raw_to_postgres(**context):
     cur.close()
     conn.close()
 
-    print(f"✅ Loaded {len(events)} records into PostgreSQL")
+    print(f"Loaded {len(events)} records into bronze.spotify_events")
 
 
 # ------------------------------------------------------
@@ -153,6 +168,7 @@ default_args = {
 with DAG(
     "spotify_minio_to_postgres_bronze",
     default_args=default_args,
+    description="Load Spotify data into Postgres Bronze",
     schedule_interval="@hourly",
     catchup=False,
 ) as dag:
